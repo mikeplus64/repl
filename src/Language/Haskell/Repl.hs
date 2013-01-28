@@ -32,7 +32,6 @@ import GhcMonad
 import Outputable (showSDocForUser, ppr, neverQualify)
 import Data.IORef
 import Data.Maybe
-import Data.List (union)
 import Data.Foldable (for_)
 
 data Repl = Repl
@@ -160,7 +159,24 @@ defaultImports
     ,"import Data.Typeable"]
 
 defaultExtensions :: [ExtensionFlag]
-defaultExtensions = glasgowExtsFlags `union` [ Opt_DataKinds, Opt_PolyKinds, Opt_TypeFamilies, Opt_TypeOperators, Opt_GADTs ]
+defaultExtensions 
+  = [Opt_DataKinds
+    ,Opt_PolyKinds
+    ,Opt_TypeFamilies
+    ,Opt_TypeOperators
+    ,Opt_GeneralizedNewtypeDeriving
+    ,Opt_DeriveFunctor
+    ,Opt_DeriveDataTypeable
+    ,Opt_OverloadedStrings
+    ,Opt_ImplicitParams
+    ,Opt_BangPatterns
+    ,Opt_PatternGuards
+    ,Opt_MultiWayIf
+    ,Opt_LambdaCase
+    ,Opt_FlexibleInstances
+    ,Opt_FlexibleContexts
+    ,Opt_FunctionalDependencies
+    ,Opt_GADTs]
 
 -- | 'Repl' smart constructor.
 repl' 
