@@ -78,9 +78,10 @@ prompt r xs x = do
             (tr,ir)  <- progress lazyResults
             threadDelay p
             killThread tr
-            elems <- readIORef ir
-            let hs = take elems xs
-            ends (trimLines hs) `seq` putMVar final hs
+            lineCount <- readIORef ir
+            case take lineCount lazyResults of
+                [] -> putMVar final []
+                hs -> ends (trimLines hs) `seq` putMVar final hs
         _ -> putMVar final (trimLines lazyResults)
 
     fin <- takeMVar final
