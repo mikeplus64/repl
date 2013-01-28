@@ -1,5 +1,8 @@
 module Language.Haskell.Repl 
-    ( Repl(patienceForResult,patienceForErrors,lineLength)
+    ( Repl
+    , patienceForResult
+    , patienceForErrors
+    , lineLength
     -- * Making 'Repl's
     , newRepl
     , repl'
@@ -50,7 +53,7 @@ enter :: Repl
       -> IO ()
 enter r sts x = writeChan (input r) (sts ++ [x])
 
--- | Naiively get the next set of results. This _does not_ take into account
+-- | Naiively get the next set of results. This /does not/ take into account
 -- 'patienceForResults', 'patienceForErrors', or 'lineLength'.
 results :: Repl -> IO [String]
 results = readChan . output
@@ -81,7 +84,7 @@ prompt r xs x = do
             lineCount <- readIORef ir
             case take lineCount lazyResults of
                 [] -> putMVar final []
-                hs -> ends (trimLines hs) `seq` putMVar final hs
+                hs -> ends (trimLines hs) `seq` putMVar final (trimLines hs)
         _ -> putMVar final (trimLines lazyResults)
 
     fin <- takeMVar final
