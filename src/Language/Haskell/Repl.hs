@@ -53,13 +53,13 @@ prompt r sts x = do
 -- | Enter commands and an expression to a 'Repl', and immediately consume results.
 -- However, truncate input to the given length, and stop the computation after the
 -- given amount of time in seconds.
-safePrompt :: Double      -- ^ Time to wait (in seconds)
+safePrompt :: Repl
+           -> Double      -- ^ Time to wait (in seconds)
            -> Int         -- ^ Maximum result length in 'Char'
-           -> Repl
            -> [String]    -- ^ Commands
            -> String      -- ^ Expression used for results.
            -> IO [String]
-safePrompt d i g sts x = do
+safePrompt g d i sts x = do
     xs <- prompt g sts x
     t  <- newEmptyMVar
     w0 <- forkIO $ do
