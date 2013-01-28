@@ -73,24 +73,24 @@ prompt r xs x = do
     enter r xs x
     lazyResults <- results r
     final       <- newEmptyMVar
-    timeout     <- forkIO $ patienceForResult r `for_` \ p -> do
+    timeout     <- forkIO (patienceForResult r `for_` \ p -> do
         threadDelay (floor (p*1000000))
-        putMVar final ["Thread timed out."]
+        putMVar final ["Thread timed out."])
     attempt <- forkIO $ case patienceForErrors r of
         Just p -> do
             (tr,ir)  <- progress lazyResults
             threadDelay p
             killThread tr
-            lineCount <- readIORef ir
-            case take lineCount lazyResults of
-                [] -> putMVar final []
-                hs -> ends (trimLines hs) `seq` putMVar final (trimLines hs)
-        _ -> putMVar final (trimLines lazyResults)
+            prog <- readIORef ir
+            case take prog lazyResults of
+                hs@(_:_) -> all ends (trimLines hs) `seq` putMVar final hs
+                _        -> putMVar final []
+        _ -> putMVar final (trimLines lazyResults) -- putMVar final (trimLines lazyResults)
 
     fin <- takeMVar final
     killThread timeout
     killThread attempt
-    return fin
+    return (trimLines fin)
 
 promptWith
     :: Repl
