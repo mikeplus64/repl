@@ -149,6 +149,7 @@ defaultImports
     ,"import Data.Function hiding ((.), id)"
     ,"import Control.Arrow"
     ,"import Data.List"
+    ,"import Data.Maybe"
     ,"import Data.Semigroup"
     ,"import Control.Monad"
     ,"import Control.Monad.Fix"
@@ -221,6 +222,7 @@ repl' imports exts inp out wait ewait len = do
         "data"     -> True
         "class"    -> True
         "type"     -> True
+        "newtype"  -> True
         _          -> False
 
 
@@ -237,6 +239,10 @@ repl' imports exts inp out wait ewait len = do
     getExts = foldr (fmap . flip xopt_set) id
     session = do
         s <- getProgramDynFlags
-        _ <- setSessionDynFlags (getExts exts s)
+        _ <- setSessionDynFlags 
+            $ (\d -> d { safeHaskell = Sf_SafeInferred })
+            . flip dopt_set Opt_DoCoreLinting 
+            $ getExts exts s
+
         getSessionDynFlags
 
