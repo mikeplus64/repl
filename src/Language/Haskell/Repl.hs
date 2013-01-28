@@ -7,6 +7,7 @@ module Language.Haskell.Repl
     , stopRepl
     -- * Interaction
     , prompt
+    , promptWith
     , enter
     , results
     ) where
@@ -81,6 +82,14 @@ prompt r xs x = do
     killThread timeout
     killThread attempt
     return fin
+
+promptWith
+    :: Repl
+    -> (String -> IO a)
+    -> [String]
+    -> String
+    -> IO ()
+promptWith r f xs x = prompt r xs x >>= mapM_ f
 
 -- | See if a lazy list has ended.
 ends :: [a] -> Bool
