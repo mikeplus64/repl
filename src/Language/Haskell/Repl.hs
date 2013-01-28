@@ -1,5 +1,5 @@
 module Language.Haskell.Repl 
-    ( Repl
+    ( Repl(patienceForResult,patienceForErrors,lineLength)
     -- * Making 'Repl's
     , newRepl
     , repl
@@ -7,10 +7,10 @@ module Language.Haskell.Repl
     , stopRepl
     -- * Interaction
     , prompt
-    , safePrompt
     , enter
     , results
     ) where
+
 import Control.Concurrent
 import Control.Applicative
 import Control.Exception
@@ -24,59 +24,63 @@ import Outputable (showSDocForUser, ppr, neverQualify)
 import Data.IORef
 import Data.Maybe
 import Data.List (union)
+import Data.Foldable (for_)
 
 data Repl = Repl
-    { input       :: Chan [String]
-    , output      :: Chan [String]
-    , interpreter :: ThreadId
+    { input             :: Chan [String]
+    , output            :: Chan [String]
+    , interpreter       :: ThreadId
+    , patienceForResult :: Maybe Double
+    , patienceForErrors :: Maybe Int
+    , lineLength        :: Maybe Int
     }
 
 apply :: String -> String -> String
 apply f x = f ++ " (" ++ x ++ ")"
 
-enter :: Repl -> [String] -> String -> IO ()
+enter :: Repl 
+      -> [String] -- ^ Commands
+      -> String   -- ^ Expression used for results.
+      -> IO ()
 enter r sts x = writeChan (input r) (sts ++ [x])
 
+-- | Naiively get the next set of results. This _does not_ take into account
+-- 'patienceForResults', 'patienceForErrors', or 'lineLength'.
 results :: Repl -> IO [String]
 results = readChan . output
 
 -- | Enter commands and an expression to a 'Repl', and immediately consume results.
--- Commands can be anything you can input in GHCi, other than imports.
-prompt :: Repl 
-       -> [String]    -- ^ Commands
-       -> String      -- ^ Expression used for results
-       -> IO [String] -- ^ _Lazy_ list of results
-prompt r sts x = do
-    enter r sts x
-    results r
-
--- | Enter commands and an expression to a 'Repl', and immediately consume results.
 -- However, truncate input to the given length, and stop the computation after the
 -- given amount of time in seconds.
-safePrompt :: Repl
-           -> Double      -- ^ Time to wait (in seconds)
-           -> Int         -- ^ Maximum result length in 'Char'
-           -> [String]    -- ^ Commands
-           -> String      -- ^ Expression used for results.
-           -> IO [String]
-safePrompt g d i sts x = do
-    xs <- prompt g sts x
-    t  <- newEmptyMVar
-    w0 <- forkIO $ do
-        threadDelay (floor (d*1000000))
-        putMVar t ["Thread timed out."]
-    w1 <- forkIO $ do
-        (tr,ir)  <- prog xs
-        threadDelay 3000
-        killThread tr
-        progress <- readIORef ir
-        case take progress xs of
-            hs@(_:_) -> ends (map (take i) hs) `seq` putMVar t hs
-            _        -> putMVar t []
-    r  <- takeMVar t
-    killThread w0
-    killThread w1
-    return (map (take i) r)
+prompt 
+    :: Repl
+    -> [String]    -- ^ Commands
+    -> String      -- ^ Expression used for results.
+    -> IO [String]
+prompt r xs x = do
+    let trimLines = case lineLength r of
+            Just l -> map (take l)
+            _      -> id
+    enter r xs x
+    lazyResults <- results r
+    final       <- newEmptyMVar
+    timeout     <- forkIO $ patienceForResult r `for_` \ p -> do
+        threadDelay (floor (p*1000000))
+        putMVar final ["Thread timed out."]
+    attempt <- forkIO $ case patienceForErrors r of
+        Just p -> do
+            (tr,ir)  <- progress lazyResults
+            threadDelay p
+            killThread tr
+            elems <- readIORef ir
+            let hs = take elems xs
+            ends (trimLines hs) `seq` putMVar final hs
+        _ -> putMVar final (trimLines lazyResults)
+
+    fin <- takeMVar final
+    killThread timeout
+    killThread attempt
+    return fin
 
 -- | See if a lazy list has ended.
 ends :: [a] -> Bool
@@ -84,8 +88,8 @@ ends []     = True
 ends (_:xs) = ends xs
 
 -- | See 'how far' a lazy list has evaluated.
-prog :: [a] -> IO (ThreadId, IORef Int)
-prog xs = do
+progress :: [a] -> IO (ThreadId, IORef Int)
+progress xs = do
     r <- newIORef 0
     let go []     = return ()
         go (_:ys) = modifyIORef r (+1) >> go ys
@@ -96,7 +100,19 @@ stopRepl :: Repl -> IO ()
 stopRepl = killThread . interpreter
 
 newRepl :: IO Repl
-newRepl = join $ repl defaultImports defaultExtensions <$> newChan <*> newChan
+newRepl = do
+    inp <- newChan
+    out <- newChan
+    repl defaultImports defaultExtensions inp out defaultWait defaultErrorWait defaultLineLength
+
+defaultWait :: Maybe Double
+defaultWait = Just 5
+
+defaultErrorWait :: Maybe Int
+defaultErrorWait = Just 3000
+
+defaultLineLength :: Maybe Int
+defaultLineLength = Just 512
 
 defaultImports :: [String]
 defaultImports
@@ -127,12 +143,15 @@ defaultExtensions :: [ExtensionFlag]
 defaultExtensions = glasgowExtsFlags `union` [ Opt_DataKinds, Opt_PolyKinds, Opt_TypeFamilies, Opt_TypeOperators, Opt_GADTs ]
 
 -- | 'Repl' smart constructor.
-repl :: [String]        -- ^ Imports, using normal Haskell import syntax.
+repl :: [String]        -- ^ Imports, using normal Haskell import syntax
      -> [ExtensionFlag] -- ^ List of compiler extensions to use
      -> Chan [String]   -- ^ Input channel
      -> Chan [String]   -- ^ Output channel
+     -> Maybe Double    -- ^ Maximum time to wait for a result, in seconds (default: 5)
+     -> Maybe Int       -- ^ Maximum time to wait for an error, in microseconds (default: 3000)
+     -> Maybe Int       -- ^ Maximum line length in 'Char' (default: 512)
      -> IO Repl
-repl imports exts inp out = do
+repl imports exts inp out wait ewait len = do
     interp <- forkIO $
         runGhc (Just libdir) $ do
             dflags <- session
@@ -170,7 +189,7 @@ repl imports exts inp out = do
 
                 liftIO $ writeChan out =<< readIORef msg
 
-    return $ Repl inp out interp
+    return $ Repl inp out interp wait ewait len 
   where
     runDeclOrStmt s 
         | isDecl s  = void (runDecls s)
