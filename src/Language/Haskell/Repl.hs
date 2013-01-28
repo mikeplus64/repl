@@ -164,7 +164,6 @@ defaultExtensions
     ,Opt_PolyKinds
     ,Opt_TypeFamilies
     ,Opt_TypeOperators
-    ,Opt_GeneralizedNewtypeDeriving
     ,Opt_DeriveFunctor
     ,Opt_DeriveDataTypeable
     ,Opt_OverloadedStrings
@@ -256,7 +255,7 @@ repl' imports exts inp out wait ewait len = do
     session = do
         s <- getProgramDynFlags
         _ <- setSessionDynFlags 
-            $ (\d -> d { safeHaskell = Sf_SafeInferred })
+            $ (\d -> d { safeHaskell = Sf_Safe })
             . flip dopt_set Opt_DoCoreLinting 
             $ getExts exts s
 
