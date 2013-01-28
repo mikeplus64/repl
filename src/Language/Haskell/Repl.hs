@@ -2,7 +2,12 @@ module Language.Haskell.Repl
     ( Repl(patienceForResult,patienceForErrors,lineLength)
     -- * Making 'Repl's
     , newRepl
-    , repl
+    , repl'
+    , defaultWait
+    , defaultErrorWait
+    , defaultLineLength
+    , defaultImports
+    , defaultExtensions
     -- * Killing 'Repl's
     , stopRepl
     -- * Interaction
@@ -112,7 +117,7 @@ newRepl :: IO Repl
 newRepl = do
     inp <- newChan
     out <- newChan
-    repl defaultImports defaultExtensions inp out defaultWait defaultErrorWait defaultLineLength
+    repl' defaultImports defaultExtensions inp out defaultWait defaultErrorWait defaultLineLength
 
 defaultWait :: Maybe Double
 defaultWait = Just 5
@@ -152,15 +157,16 @@ defaultExtensions :: [ExtensionFlag]
 defaultExtensions = glasgowExtsFlags `union` [ Opt_DataKinds, Opt_PolyKinds, Opt_TypeFamilies, Opt_TypeOperators, Opt_GADTs ]
 
 -- | 'Repl' smart constructor.
-repl :: [String]        -- ^ Imports, using normal Haskell import syntax
-     -> [ExtensionFlag] -- ^ List of compiler extensions to use
-     -> Chan [String]   -- ^ Input channel
-     -> Chan [String]   -- ^ Output channel
-     -> Maybe Double    -- ^ Maximum time to wait for a result, in seconds (default: 5)
-     -> Maybe Int       -- ^ Maximum time to wait for an error, in microseconds (default: 3000)
-     -> Maybe Int       -- ^ Maximum line length in 'Char' (default: 512)
-     -> IO Repl
-repl imports exts inp out wait ewait len = do
+repl' 
+    :: [String]        -- ^ Imports, using normal Haskell import syntax
+    -> [ExtensionFlag] -- ^ List of compiler extensions to use
+    -> Chan [String]   -- ^ Input channel
+    -> Chan [String]   -- ^ Output channel
+    -> Maybe Double    -- ^ Maximum time to wait for a result, in seconds (default: 5)
+    -> Maybe Int       -- ^ Maximum time to wait for an error, in microseconds (default: 3000)
+    -> Maybe Int       -- ^ Maximum line length in 'Char' (default: 512)
+    -> IO Repl
+repl' imports exts inp out wait ewait len = do
     interp <- forkIO $
         runGhc (Just libdir) $ do
             dflags <- session
