@@ -67,8 +67,8 @@ prompt
     -> String      -- ^ Expression used for results.
     -> IO [String]
 prompt r xs x = do
-    let trimLines = case lineLength r of
-            Just l -> map (take l)
+    let trimLine = case lineLength r of
+            Just l -> take l
             _      -> id
     enter r xs x
     lazyResults <- results r
@@ -82,9 +82,10 @@ prompt r xs x = do
             threadDelay p
             killThread tr
             prog <- readIORef ir
-            let hs = trimLines (take prog lazyResults)
-            all ends hs `seq` putMVar final (trimLines hs)
-        _ -> putMVar final (trimLines lazyResults)
+            let hs = map trimLine (take prog lazyResults)
+            ends hs `seq` putMVar final hs                
+
+        _ -> putMVar final (map trimLine lazyResults)
 
     fin <- takeMVar final
     killThread timeout
@@ -106,8 +107,9 @@ ends (_:xs) = ends xs
 
 -- | See 'how far' a lazy list has evaluated.
 progress :: [a] -> IO (ThreadId, IORef Int)
+progress [] = (,) <$> forkIO (return ()) <*> newIORef 0
 progress xs = do
-    r <- newIORef 1
+    r <- newIORef 0
     let go []     = return ()
         go (_:ys) = modifyIORef r (+1) >> go ys
     t <- forkIO (go xs)
