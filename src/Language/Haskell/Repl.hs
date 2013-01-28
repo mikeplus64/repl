@@ -82,15 +82,14 @@ prompt r xs x = do
             threadDelay p
             killThread tr
             prog <- readIORef ir
-            case take prog lazyResults of
-                hs@(_:_) -> all ends (trimLines hs) `seq` putMVar final hs
-                _        -> putMVar final []
-        _ -> putMVar final (trimLines lazyResults) -- putMVar final (trimLines lazyResults)
+            let hs = trimLines (take prog lazyResults)
+            all ends hs `seq` putMVar final (trimLines hs)
+        _ -> putMVar final (trimLines lazyResults)
 
     fin <- takeMVar final
     killThread timeout
     killThread attempt
-    return (trimLines fin)
+    return fin
 
 promptWith
     :: Repl
@@ -108,7 +107,7 @@ ends (_:xs) = ends xs
 -- | See 'how far' a lazy list has evaluated.
 progress :: [a] -> IO (ThreadId, IORef Int)
 progress xs = do
-    r <- newIORef 0
+    r <- newIORef 1
     let go []     = return ()
         go (_:ys) = modifyIORef r (+1) >> go ys
     t <- forkIO (go xs)
