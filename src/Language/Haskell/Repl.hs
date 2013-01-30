@@ -1,56 +1,51 @@
-module Language.Haskell.Repl 
-    ( Repl
-    , patienceForResult
-    , patienceForErrors
-    , lineLength
-    -- * Making 'Repl's
-    , newRepl
-    , repl'
-    , defaultWait
-    , defaultErrorWait
-    , defaultLineLength
-    , defaultImports
-    , defaultExtensions
-    -- * Killing 'Repl's
-    , stopRepl
-    -- * Interaction
-    , prompt
-    , promptWith
-    , enter
-    , results
-    ) where
+module Language.Haskell.Repl where
 
 import Control.Concurrent
 import Control.Applicative
 import Control.Exception
 import Control.Monad
+import Control.Arrow
 import Data.Dynamic
 import GHC
 import GHC.Paths (libdir)
 import DynFlags
 import GhcMonad
-import Outputable (showSDocForUser, ppr, neverQualify)
+import Outputable (showSDocForUser, ppr, neverQualify, Outputable)
 import Data.IORef
 import Data.Maybe
 import Data.Foldable (for_)
 
+data Input
+    = Type      { input :: String }
+    | Kind      { input :: String }
+    | Info      { input :: String }
+    | Decl      { input :: String }
+    | Bind      { input :: String }
+    | Expr      { input :: String }
+    | Undefine  { input :: String }
+    | Clear
+  deriving Show
+
+data Output
+    = ReplError { failure :: String }
+    | GhcError  { failure :: String }
+    | Output    { output :: [String] }
+  deriving Show
+
 data Repl = Repl
-    { input             :: Chan [String]
-    , output            :: Chan [String]
+    { inputChan         :: Chan Input
+    , outputChan        :: Chan Output
     , interpreter       :: ThreadId
     , patienceForResult :: Maybe Double
     , patienceForErrors :: Maybe Int
     , lineLength        :: Maybe Int
     }
 
-apply :: String -> String -> String
-apply f x = f ++ " (" ++ x ++ ")"
-
+{-
 enter :: Repl 
-      -> [String] -- ^ Commands
-      -> String   -- ^ Expression used for results.
+      -> Input
       -> IO ()
-enter r sts x = writeChan (input r) (sts ++ [x])
+enter r x = writeChan (input r) x
 
 -- | Naiively get the next set of results. This /does not/ take into account
 -- 'patienceForResults', 'patienceForErrors', or 'lineLength'.
@@ -62,8 +57,7 @@ results = readChan . output
 -- given amount of time in seconds.
 prompt 
     :: Repl
-    -> [String]    -- ^ Commands
-    -> String      -- ^ Expression used for results.
+    -> Input
     -> IO [String]
 prompt r xs x = do
     let trimLine = case lineLength r of
@@ -98,6 +92,7 @@ promptWith
     -> String
     -> IO ()
 promptWith r f xs x = prompt r xs x >>= mapM_ f
+-}
 
 -- | See if a lazy list has ended.
 ends :: [a] -> Bool
@@ -177,12 +172,17 @@ defaultExtensions
     ,Opt_FunctionalDependencies
     ,Opt_GADTs]
 
+prompt_ :: Repl -> Input -> IO Output
+prompt_ r i = do
+    writeChan (inputChan r) i
+    readChan (outputChan r)
+
 -- | 'Repl' smart constructor.
 repl' 
     :: [String]        -- ^ Imports, using normal Haskell import syntax
     -> [ExtensionFlag] -- ^ List of compiler extensions to use
-    -> Chan [String]   -- ^ Input channel
-    -> Chan [String]   -- ^ Output channel
+    -> Chan Input      -- ^ Input channel
+    -> Chan Output     -- ^ Output channel
     -> Maybe Double    -- ^ Maximum time to wait for a result, in seconds (default: 5)
     -> Maybe Int       -- ^ Maximum time to wait for an error, in microseconds (default: 3000)
     -> Maybe Int       -- ^ Maximum line length in 'Char' (default: 512)
@@ -191,64 +191,47 @@ repl' imports exts inp out wait ewait len = do
     interp <- forkIO $
         runGhc (Just libdir) $ do
             dflags <- session
+            let sdoc :: Outputable a => a -> String
+                sdoc = showSDocForUser dflags neverQualify . ppr
+
+                formatType 
+                    = splitForAllTys 
+                  >>> snd
+                  >>> sdoc
+                  >>> lines
+                  >>> Output
+
             forever $ do
                 import_ imports
-                x   <- liftIO (readChan inp)
-                msg <- liftIO (newIORef [])
-
-                forM_ (init x) (\s ->
-                    runDeclOrStmt s 
-                  `gcatch` 
-                    \e@SomeException{} -> liftIO (modifyIORef msg (++ lines (show e))))
-
-                liftIO . modifyIORef msg . flip (++) =<<
-                    case last x of
-                        ':':c:' ':arg -> case c of
-                            't' -> errs (showSDocForUser dflags neverQualify . ppr) (snd . splitForAllTys <$> exprType arg)
-                            'k' -> errs (showSDocForUser dflags neverQualify . ppr) (snd <$> typeKind True arg)
-                            'd' | arg == "all" -> do
-                                setTargets []
-                                _<-load LoadAllTargets
-                                return ["Cleared memory."]
-                                
-                            _   -> return ["Invalid command."]
-                        e | isDecl e  -> errs
-                                (const "OK.")
-                                (runDecls e)
-                          | otherwise -> case words e of
-                                ("let":_) -> errs 
-                                    (const "OK.")
-                                    (runStmt e SingleStep)
-                                _ -> errs
-                                    (`fromDyn` "")
-                                    (dynCompileExpr ("show" `apply` e))
-
-                liftIO $ writeChan out =<< readIORef msg
-
-    return $ Repl inp out interp wait ewait len 
+                input' <- liftIO (readChan inp)
+                liftIO . writeChan out =<< case input' of
+                    Clear      -> do
+                        setTargets []
+                        void (load LoadAllTargets)
+                        return $ Output []
+                    Undefine _ -> do
+                        tgs <- getTargets
+                        liftIO (putStrLn $ sdoc tgs)
+                        return $ Output []
+                    Type s -> errors $ formatType <$> exprType s
+                    Kind s -> errors $ formatType . snd <$> typeKind True s
+                    Decl s -> errors $ do runDecls s; return $ Output ["OK."]
+                    Bind s -> errors $ do void (runStmt ("let {" ++ s ++ "}") SingleStep); return $ Output ["OK."]
+                    Expr s -> errors $ do
+                        compiled <- dynCompileExpr $ "show (" ++ s ++ ")"
+                        return $ Output [fromDyn compiled ""]
+                    Info s -> errors $ do
+                        names <- parseName s
+                        infos <- concatMap (\(t,f,cs) -> sdoc t : sdoc f : map sdoc cs)
+                               . catMaybes
+                             <$> mapM getInfo names
+                        return $ Output infos
+    return $ Repl inp out interp wait ewait len
   where
-    runDeclOrStmt s 
-        | isDecl s  = void (runDecls s)
-        | otherwise = void (runStmt ("let {" ++ s ++ "}") SingleStep)
-
-    isDecl x = maybe False decl (listToMaybe (words x))
-    decl x = case x of
-        "instance" -> True
-        "data"     -> True
-        "class"    -> True
-        "type"     -> True
-        "newtype"  -> True
-        _          -> False
-
-
-    errs :: (a -> String) -> Ghc a -> Ghc [String]
-    errs f x = fmap (lines . f) x 
-      `gcatch` \e@SomeException{} 
-               -> return 
-                    ( -- map (dropWhile isSpace . dropWhileEnd isSpace)
-                      lines 
-                    . show 
-                    $ e)
+    errors x = x `gcatch` \ e@SomeException{} -> 
+        case fromException e :: Maybe ErrorCall of
+            Just _ -> return $ ReplError (show e)
+            _      -> return $ GhcError  (show e)
 
     import_ = mapM (fmap IIDecl . parseImportDecl) >=> setContext
     getExts = foldr (fmap . flip xopt_set) id
