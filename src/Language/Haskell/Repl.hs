@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Language.Haskell.Repl 
-    ( Repl(..)
+    ( Repl
     -- * Construction
     , newRepl
     , repl'
@@ -15,7 +15,7 @@ module Language.Haskell.Repl
     , ReplOutput(..)
     , Output(..) 
     , prompt
-    , prompt'
+    , prompt_
     , input
     , output
     , prettyOutput
@@ -31,7 +31,7 @@ import Data.Dynamic
 import Data.IORef
 import Data.Maybe
 import qualified Data.DList as DL
-import Text.Parsec hiding (many,(<|>))
+import Text.Parsec hiding (many,(<|>),newline)
 import Text.Parsec.String
 import qualified Language.Haskell.Exts.Parser as H
 import qualified Language.Haskell.Exts.Syntax as H
@@ -69,7 +69,7 @@ data Output
 
 prefix :: Char -> Parser ()
 prefix c = do
-    string [':',c]
+    _ <- string [':',c]
     spaces
 
 input' :: Char -> (String -> Parser a) -> Parser a
@@ -101,10 +101,19 @@ parseStmt = do
 parseExpr     = Expr <$> getInput
 parseUndefine = simpl 'd' Undefine
 parseClear    = simpl 'c' (const Clear)
-parseInput    = probably [ parseClear, parseUndefine, parseType, parseKind, parseInfo, parseStmt, parseDecl, parseExpr ]
-  where
-    probably = foldr1 (\l r -> Text.Parsec.try l <|> r)
 
+-- | Used by 'prompt'
+parseInput   = foldr1 (\l r -> Text.Parsec.try l <|> r) 
+    [ parseClear
+    , parseUndefine
+    , parseType
+    , parseKind
+    , parseInfo
+    , parseStmt
+    , parseDecl
+    , parseExpr ]
+
+-- | Used by 'prompt'.
 prettyOutput :: Output -> [String]
 prettyOutput (OK s)          = s
 prettyOutput (Exception s e) = overLast (++ ("*** Exception: " ++ e)) s
@@ -120,11 +129,13 @@ data Repl = Repl
     , lineLength        :: Int
     }
 
+-- | Send input.
 input :: Repl -> Input -> IO ()
 input = writeChan . inputChan
 
 -- | Naiively get the next set of results. This /does not/ take into account
--- 'patienceForResults', 'patienceForErrors', or 'lineLength'.
+-- 'patienceForResults', 'patienceForErrors', or 'lineLength'. However, due
+-- to laziness, this may not matter.
 output :: Repl -> IO ReplOutput
 output = readChan . outputChan
 
@@ -322,8 +333,8 @@ repl' imports exts inp out wait len = do
 
             forever $ do
                 import_ imports
-                input' <- liftIO (readChan inp)
-                liftIO . writeChan out =<< case input' of
+                i' <- liftIO (readChan inp)
+                liftIO . writeChan out =<< case i' of
                     Clear      -> do
                         setTargets []
                         void (load LoadAllTargets)
