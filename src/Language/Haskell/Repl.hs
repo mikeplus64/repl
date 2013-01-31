@@ -1,5 +1,26 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Language.Haskell.Repl where
+module Language.Haskell.Repl 
+    ( Repl(..)
+    -- * Construction
+    , newRepl
+    , repl'
+    , defaultExtensions
+    , defaultImports
+    , defaultLineLength
+    , defaultPatienceForResults
+    -- * Stopping
+    , stopRepl
+    -- * Interaction
+    , Input(..)
+    , ReplOutput(..)
+    , Output(..) 
+    , prompt
+    , prompt'
+    , input
+    , output
+    , prettyOutput
+    , parseInput
+    ) where
 
 import Control.Concurrent
 import Control.Applicative
@@ -84,12 +105,12 @@ parseInput    = probably [ parseClear, parseUndefine, parseType, parseKind, pars
   where
     probably = foldr1 (\l r -> Text.Parsec.try l <|> r)
 
-ppoutput :: Output -> [String]
-ppoutput (OK s)          = s
-ppoutput (Exception s e) = overLast (++ ("*** Exception: " ++ e)) s
-ppoutput (Errors errs)   = errs
-ppoutput (Partial s)     = overLast (++ "*** Timed out") s
-ppoutput Timeout         = ["*** Timed out"]
+prettyOutput :: Output -> [String]
+prettyOutput (OK s)          = s
+prettyOutput (Exception s e) = overLast (++ ("*** Exception: " ++ e)) s
+prettyOutput (Errors errs)   = errs
+prettyOutput (Partial s)     = overLast (++ "*** Timed out") s
+prettyOutput Timeout         = ["*** Timed out"]
 
 data Repl = Repl
     { inputChan         :: Chan Input
@@ -131,7 +152,7 @@ prompt
     :: Repl
     -> String
     -> IO [String]
-prompt repl x = ppoutput <$> prompt_ repl (case runParser parseInput () "" x of
+prompt repl x = prettyOutput <$> prompt_ repl (case runParser parseInput () "" x of
     Right a -> a
     -- Should be impossible to reach. parseExpr gobbles up everything.
     _       -> error "Cannot parse input!")
