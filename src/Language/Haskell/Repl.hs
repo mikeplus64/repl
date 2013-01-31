@@ -7,7 +7,7 @@ module Language.Haskell.Repl
     , defaultExtensions
     , defaultImports
     , defaultLineLength
-    , defaultPatienceForResults
+    , defaultPatience
     -- * Stopping
     , stopRepl
     -- * Interaction
@@ -42,6 +42,16 @@ import DynFlags
 import GhcMonad
 import Outputable (showSDocForUser, Outputable, ppr, neverQualify)
 
+data Repl a = Repl
+    { inputChan         :: Chan Input
+    , outputChan        :: Chan (ReplOutput a)
+    , interpreter       :: ThreadId
+    , processOutput     :: Dynamic -> IO a
+    , buildExpr         :: String  -> String
+    , patience          :: Double
+    , lineLength        :: Int
+    }
+
 data Input
     = Type     String
     | Kind     String
@@ -53,10 +63,11 @@ data Input
     | Clear
   deriving Show
 
-data ReplOutput
+data ReplOutput a
     = ReplError String
     | GhcError  String
     | Output    [String]
+    | Result    a-- [String]
   deriving Show
 
 data Output
@@ -121,22 +132,14 @@ prettyOutput (Errors errs)   = errs
 prettyOutput (Partial s)     = overLast (++ "*** Timed out") s
 prettyOutput Timeout         = ["*** Timed out"]
 
-data Repl = Repl
-    { inputChan         :: Chan Input
-    , outputChan        :: Chan ReplOutput
-    , interpreter       :: ThreadId
-    , patienceForResult :: Double
-    , lineLength        :: Int
-    }
-
 -- | Send input.
-input :: Repl -> Input -> IO ()
+input :: Repl a -> Input -> IO ()
 input = writeChan . inputChan
 
 -- | Naiively get the next set of results. This /does not/ take into account
--- 'patienceForResults', 'patienceForErrors', or 'lineLength'. However, due
+-- 'patiences', 'patienceForErrors', or 'lineLength'. However, due
 -- to laziness, this may not matter.
-output :: Repl -> IO ReplOutput
+output :: Repl a -> IO (ReplOutput a)
 output = readChan . outputChan
 
 {-# INLINE (!?) #-}
@@ -160,7 +163,7 @@ overLast f = go
 
 -- | Same as 'prompt_', except it parses the input, and pretty prints the results.
 prompt
-    :: Repl
+    :: Repl [String]
     -> String
     -> IO [String]
 prompt repl x = prettyOutput <$> prompt_ repl (case runParser parseInput () "" x of
@@ -172,7 +175,7 @@ prompt repl x = prettyOutput <$> prompt_ repl (case runParser parseInput () "" x
 -- However, truncate input to the given length, and stop the computation after the
 -- given amount of time in seconds.
 prompt_ 
-    :: Repl
+    :: Repl [String]
     -> Input
     -> IO Output
 prompt_ repl x = do
@@ -200,11 +203,11 @@ prompt_ repl x = do
             fork $ forM_ ys $ \_ -> modifyIORef acc (\i -> if i > lineLength repl then i else i+1)
             return acc
 
-    unlessError results $ \ res -> do
+    unlessRedundant results $ \ res -> do
 
         -- Time out
         fork $ do
-            threadDelay (floor (patienceForResult repl*1000000))
+            threadDelay (floor (patience repl*1000000))
             u <- readOutputs
             case res !? length u of
                 Nothing -> putMVar final (if null u then Timeout else Partial u)
@@ -231,18 +234,27 @@ prompt_ repl x = do
   where
     trim = take (lineLength repl)
 
-    unlessError (ReplError s) _ = return . Errors . map trim . lines $ s
-    unlessError (GhcError  s) _ = return . Errors . map trim . lines $ s
-    unlessError (Output s) f    = f s
+    -- | Don't bother with things other than an actual result from an expression -- they will be loaded "instantly"
+    unlessRedundant (ReplError s) _ = return . Errors . map trim . lines $ s
+    unlessRedundant (GhcError  s) _ = return . Errors . map trim . lines $ s
+    unlessRedundant (Output s) _    = return . OK . map trim $ s
+    unlessRedundant (Result s) f    = f s
 
-stopRepl :: Repl -> IO ()
+stopRepl :: Repl a -> IO ()
 stopRepl = killThread . interpreter
 
-newRepl :: IO Repl
+-- | Default GHCi-like 'Repl'
+newRepl :: IO (Repl [String])
 newRepl = do
     inp <- newChan
     out <- newChan
-    repl' defaultImports defaultExtensions inp out Nothing Nothing
+    repl' inp out 
+        defaultImports 
+        defaultExtensions 
+        defaultBuildExpr 
+        defaultProcessOutput 
+        defaultPatience
+        defaultLineLength
 
 defaultImports :: [String]
 defaultImports
@@ -273,7 +285,7 @@ defaultImports
     ,"import Data.Maybe"
     ,"import Data.Semigroup"
     ,"import Data.Bits"
-    ,"import Data.Bits.Lens"
+    ,"import Data.Array"
     ,"import Data.Ix"
     ,"import Data.Functor"
     ,"import Data.Typeable"
@@ -302,22 +314,32 @@ defaultExtensions
     ,Opt_FunctionalDependencies
     ,Opt_GADTs]
 
+-- | defaultLineLength = 512
 defaultLineLength :: Int
 defaultLineLength = 512
 
-defaultPatienceForResults :: Double
-defaultPatienceForResults = 5
+-- | defaultPatience = 5
+defaultPatience :: Double
+defaultPatience = 5
+
+defaultBuildExpr :: String -> String
+defaultBuildExpr x = "show (" ++ x ++ ")"
+
+defaultProcessOutput :: Dynamic -> IO [String]
+defaultProcessOutput d = return (lines (fromDyn d ""))
 
 -- | 'Repl' smart constructor.
 repl' 
-    :: [String]        -- ^ Imports, using normal Haskell import syntax
-    -> [ExtensionFlag] -- ^ List of compiler extensions to use
-    -> Chan Input      -- ^ Input channel
-    -> Chan ReplOutput -- ^ Output channel
-    -> Maybe Double    -- ^ Maximum time to wait for a result, in seconds (default: 5)
-    -> Maybe Int       -- ^ Maximum line length in 'Char' (default: 512)
-    -> IO Repl
-repl' imports exts inp out wait len = do
+    :: Chan Input           -- ^ Input channel
+    -> Chan (ReplOutput a)  -- ^ Output channel
+    -> [String]             -- ^ Imports, using normal Haskell import syntax
+    -> [ExtensionFlag]      -- ^ List of compiler extensions to use
+    -> (String -> String)   -- ^ Used to build the expression actually sent to GHC
+    -> (Dynamic -> IO a)    -- ^ Used to send output to the output 'Chan'.
+    -> Double               -- ^ Maximum time to wait for a result, in seconds
+    -> Int                  -- ^ Maximum line length in 'Char'
+    -> IO (Repl a)
+repl' inp out imports exts build process wait len = do
     interp <- forkIO $
         runGhc (Just libdir) $ do
             dflags <- session
@@ -338,22 +360,31 @@ repl' imports exts inp out wait len = do
                     Clear      -> do
                         setTargets []
                         void (load LoadAllTargets)
-                        return $ Output ["OK, I forgot everything."]
-                    Undefine _ -> return $ Output ["Not implemented yet."]
+                        return (Output ["Cleared memory."])
+                    Undefine _ -> return (ReplError "Not implemeneted")
                     Type s -> errors $ formatType <$> exprType s
                     Kind s -> errors $ formatType . snd <$> typeKind True s
-                    Decl s -> errors $ do _names <- runDecls s; return $ Output ["OK."]
-                    Stmt s -> errors $ do void (runStmt s SingleStep); return $ Output ["OK."]
+                    Decl s -> errors $ do _names <- runDecls s; return (Output ["OK."]) --  ["OK."]
+                    Stmt s -> errors $ do void (runStmt s SingleStep); return (Output ["OK."])
                     Expr s -> errors $ do
-                        compiled <- dynCompileExpr $ "show (" ++ s ++ ")"
-                        return $ Output [fromDyn compiled ""]
+                        compiled <- dynCompileExpr (build s)
+                        built    <- liftIO (process compiled)
+                        return (Result built)
                     Info s -> errors $ do
                         names <- parseName s
                         infos <- concatMap (\(t,f,cs) -> sdoc t : sdoc f : map sdoc cs)
                                . catMaybes
                              <$> mapM getInfo names
                         return $ Output infos
-    return $ Repl inp out interp (fromMaybe defaultPatienceForResults wait) (fromMaybe defaultLineLength len)
+    return Repl 
+        { inputChan      = inp
+        , outputChan     = out
+        , interpreter    = interp
+        , processOutput  = process
+        , buildExpr      = build
+        , patience       = wait
+        , lineLength     = len
+        }
   where
     errors x = x `gcatch` \ e@SomeException{} -> 
         case fromException e :: Maybe ErrorCall of
