@@ -32,9 +32,10 @@ data ReplOutput
   deriving Show
 
 data Output
-    = OK      [String]
-    | Errors  [String]
-    | Partial [String]
+    = OK        [String]
+    | Exception [String] String
+    | Errors    [String]
+    | Partial   [String]
     | Timeout
   deriving Show
 
@@ -75,16 +76,35 @@ prompt repl x = do
     input repl x
     results <- output repl
     threads <- newIORef []
+    final   <- newEmptyMVar
+    outputs <- newIORef []
 
-    let fork f  = forkIO f >>= \t -> modifyIORef threads (t:)
+    let newline :: IO ()
+        newline = modifyIORef outputs (++ [])
+
+        -- append a single character to outputs
+        push :: Char -> IO ()
+        push c = modifyIORef outputs $ \ os ->
+            case os of
+                [] -> [[c]]
+                _  -> 
+                    let o = last os
+                    in init os ++ [o ++ [c]]
+        
+        fork :: IO () -> IO ()
+        fork f = do
+            t <- forkIO $ f `catch` \e@SomeException{} -> do
+                outs <- readIORef outputs
+                putMVar final (Exception outs (show e))
+            modifyIORef threads (t:)
+
+        prog :: [a] -> IO (IORef Int)
         prog ys = do
             acc <- newIORef 0
             fork $ forM_ ys $ \_ -> modifyIORef acc (\i -> if i > lineLength repl then i else i+1)
             return acc
 
     unlessError results $ \ res -> do
-        final   <- newEmptyMVar
-        outputs <- newIORef []
 
         -- Time out
         fork $ do
@@ -95,12 +115,18 @@ prompt repl x = do
                 Just h  -> do
                     p <- prog h
                     i <- readIORef p
-                    putMVar final (Partial (u ++ [take i h]))
+                    putMVar final $ case take i h of
+                        [] -> case u of
+                            [] -> Timeout
+                            _  -> Partial u
+                        xs -> Partial (u ++ [xs])
 
         -- Return everything
         fork $ do
             let r = map trim res
-            forM_ r $ \l -> ends l `seq` modifyIORef outputs (++ [l])                    
+            forM_ r $ \l -> do
+                forM_ l push
+                newline
             putMVar final (OK r)
 
         fin <- takeMVar final
@@ -113,11 +139,6 @@ prompt repl x = do
     unlessError (GhcError  s) _ = return . Errors . map trim . lines $ s
     unlessError (Output s) f    = f s
 
--- | See if a lazy list has ended.
-ends :: [a] -> Bool
-ends []     = True
-ends (_:xs) = ends xs
-
 stopRepl :: Repl -> IO ()
 stopRepl = killThread . interpreter
 
@@ -129,37 +150,51 @@ newRepl = do
 
 defaultImports :: [String]
 defaultImports
-  = ["import Prelude hiding ((.), id)"
+  = ["import Prelude hiding ((.), id, catch)"
     ,"import GHC.TypeLits"
     ,"import qualified Data.Map as M"
     ,"import qualified Data.Foldable as F"
     ,"import qualified Data.Traversable as T"
+    ,"import qualified Control.Exception (catch)"
     ,"import Control.Monad.Reader"
     ,"import Control.Monad.State"
     ,"import Control.Monad.Writer"
     ,"import Control.Monad.RWS"
+    ,"import Control.Monad.Identity"
+    ,"import Control.Monad.ST"
     ,"import Control.Comonad"
     ,"import Control.Category"
-    ,"import Data.Function hiding ((.), id)"
-    ,"import Control.Arrow"
-    ,"import Data.List"
-    ,"import Data.Maybe"
-    ,"import Data.Semigroup"
     ,"import Control.Monad"
     ,"import Control.Monad.Fix"
     ,"import Control.Applicative"
     ,"import Control.Lens"
+    ,"import Control.Arrow"
+    ,"import Data.Function hiding ((.), id)"
+    ,"import Data.Either"
+    ,"import Data.Int"
+    ,"import Data.Word"
+    ,"import Data.List"
+    ,"import Data.Maybe"
+    ,"import Data.Semigroup"
+    ,"import Data.Bits"
+    ,"import Data.Bits.Lens"
+    ,"import Data.Ix"
     ,"import Data.Functor"
-    ,"import Data.Typeable"]
+    ,"import Data.Typeable"
+    ]
 
 defaultExtensions :: [ExtensionFlag]
 defaultExtensions 
   = [Opt_DataKinds
     ,Opt_PolyKinds
+    ,Opt_KindSignatures
     ,Opt_TypeFamilies
     ,Opt_TypeOperators
     ,Opt_DeriveFunctor
+    ,Opt_DeriveTraversable
+    ,Opt_DeriveFoldable
     ,Opt_DeriveDataTypeable
+    ,Opt_DeriveGeneric
     ,Opt_OverloadedStrings
     ,Opt_ImplicitParams
     ,Opt_BangPatterns
@@ -177,6 +212,7 @@ defaultLineLength = 512
 defaultPatienceForResults :: Double
 defaultPatienceForResults = 5
 
+-- | 'prompt_', if you don't care about limits.
 prompt_ :: Repl -> Input -> IO ReplOutput
 prompt_ r i = do
     writeChan (inputChan r) i
@@ -212,11 +248,8 @@ repl' imports exts inp out wait len = do
                     Clear      -> do
                         setTargets []
                         void (load LoadAllTargets)
-                        return $ Output []
-                    Undefine _ -> do
-                        tgs <- getTargets
-                        liftIO (putStrLn $ sdoc tgs)
-                        return $ Output []
+                        return $ Output ["OK, I forgot everything."]
+                    Undefine _ -> return $ Output ["Not implemented yet."]
                     Type s -> errors $ formatType <$> exprType s
                     Kind s -> errors $ formatType . snd <$> typeKind True s
                     Decl s -> errors $ do _names <- runDecls s; return $ Output ["OK."]
