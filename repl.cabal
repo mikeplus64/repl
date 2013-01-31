@@ -1,5 +1,5 @@
 name:                repl
-version:             0.91
+version:             0.92
 synopsis:            IRC friendly REPL library.
 description:         IRC friendly REPL library. Similar to mueval, but
                      implemented as a server using the GHC API, making it
