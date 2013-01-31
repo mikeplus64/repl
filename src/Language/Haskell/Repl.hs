@@ -13,6 +13,7 @@ import GhcMonad
 import Outputable
 import Data.IORef
 import Data.Maybe
+import qualified Data.DList as DL
 
 data Input
     = Type     String
@@ -47,6 +48,7 @@ data Repl = Repl
     , lineLength        :: Int
     }
 
+{-# INLINE (!?) #-}
 (!?) :: [a] -> Int -> Maybe a
 ys !? i 
     | i >= 0    = go 0 ys
@@ -56,6 +58,14 @@ ys !? i
     go j (x:xs) 
         | j == i    = Just x
         | otherwise = go (j+1) xs
+
+{-# INLINE overLast #-}
+overLast :: (a -> a) -> [a] -> [a]
+overLast f = go
+  where
+    go []     = []
+    go [x]    = [f x]
+    go (x:xs) = x : go xs
 
 input :: Repl -> Input -> IO ()
 input = writeChan . inputChan
@@ -77,28 +87,21 @@ prompt repl x = do
     results <- output repl
     threads <- newIORef []
     final   <- newEmptyMVar
-    outputs <- newIORef []
 
-    let newline :: IO ()
-        newline = modifyIORef outputs (++ [])
+    -- outputs is used iff an exception is raised by the compiled input.
+    outputs <- newIORef [] :: IO (IORef [DL.DList Char])
 
-        -- append a single character to outputs
-        push :: Char -> IO ()
-        push c = modifyIORef outputs $ \ os ->
-            case os of
-                [] -> [[c]]
-                _  -> 
-                    let o = last os
-                    in init os ++ [o ++ [c]]
-        
-        fork :: IO () -> IO ()
+    let readOutputs = map DL.toList <$> readIORef outputs
+        newline     = modifyIORef outputs (++ [DL.empty])
+        push char'  = modifyIORef outputs (overLast (`DL.snoc` char'))
+
         fork f = do
             t <- forkIO $ f `catch` \e@SomeException{} -> do
-                outs <- readIORef outputs
+                outs <- readOutputs
                 putMVar final (Exception outs (show e))
             modifyIORef threads (t:)
 
-        prog :: [a] -> IO (IORef Int)
+        -- Get the "progress" of a list.
         prog ys = do
             acc <- newIORef 0
             fork $ forM_ ys $ \_ -> modifyIORef acc (\i -> if i > lineLength repl then i else i+1)
@@ -109,7 +112,7 @@ prompt repl x = do
         -- Time out
         fork $ do
             threadDelay (floor (patienceForResult repl*1000000))
-            u <- readIORef outputs
+            u <- readOutputs
             case res !? length u of
                 Nothing -> putMVar final (if null u then Timeout else Partial u)
                 Just h  -> do
@@ -125,8 +128,8 @@ prompt repl x = do
         fork $ do
             let r = map trim res
             forM_ r $ \l -> do
-                forM_ l push
                 newline
+                forM_ l push
             putMVar final (OK r)
 
         fin <- takeMVar final
