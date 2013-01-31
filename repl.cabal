@@ -1,5 +1,5 @@
 name:                repl
-version:             0.8
+version:             0.9
 synopsis:            IRC friendly REPL library.
 description:         IRC friendly REPL library. Similar to mueval, but
                      implemented as a server using the GHC API, making it
@@ -15,4 +15,4 @@ cabal-version:       >=1.8
 library
   hs-source-dirs:      src
   exposed-modules:     Language.Haskell.Repl
-  build-depends:       base == 4.6.*, ghc == 7.6.*, ghc-paths >= 0.1, dlist
+  build-depends:       base == 4.6.*, ghc == 7.6.*, ghc-paths >= 0.1, dlist, parsec

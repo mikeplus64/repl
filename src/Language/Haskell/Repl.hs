@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 module Language.Haskell.Repl where
 
 import Control.Concurrent
@@ -6,21 +7,26 @@ import Control.Exception
 import Control.Monad
 import Control.Arrow
 import Data.Dynamic
+import Data.IORef
+import Data.Maybe
+import qualified Data.DList as DL
+import Text.Parsec hiding (many,(<|>))
+import Text.Parsec.String
+import qualified Language.Haskell.Exts.Parser as H
+import qualified Language.Haskell.Exts.Syntax as H
+
 import GHC
 import GHC.Paths
 import DynFlags
 import GhcMonad
-import Outputable
-import Data.IORef
-import Data.Maybe
-import qualified Data.DList as DL
+import Outputable (showSDocForUser, Outputable, ppr, neverQualify)
 
 data Input
     = Type     String
     | Kind     String
     | Info     String
     | Decl     String
-    | Bind     String
+    | Stmt     String
     | Expr     String
     | Undefine String
     | Clear
@@ -40,6 +46,51 @@ data Output
     | Timeout
   deriving Show
 
+prefix :: Char -> Parser ()
+prefix c = do
+    string [':',c]
+    spaces
+
+input' :: Char -> (String -> Parser a) -> Parser a
+input' p f = do
+    prefix p
+    f =<< getInput
+
+simpl :: Char -> (String -> a) -> Parser a
+simpl c f = input' c (return . f)
+
+valid :: (String -> H.ParseResult a) -> String -> Bool
+valid f x = case f x of
+    H.ParseOk _ -> True
+    _           -> False
+
+parseType, parseKind, parseInfo, parseDecl, parseStmt, parseExpr, parseUndefine, parseClear, parseInput :: Parser Input
+parseType = simpl 't' Type
+parseKind = simpl 'k' Kind
+parseInfo = simpl 'i' Info
+parseDecl = do
+    decl <- getInput
+    guard (valid H.parseDecl decl)
+    return (Decl decl)
+parseStmt = do
+    stmt <- getInput
+    case H.parseStmt stmt of
+        H.ParseOk (H.LetStmt _) -> return (Stmt stmt)
+        _                       -> fail "Not a let binding."
+parseExpr     = Expr <$> getInput
+parseUndefine = simpl 'd' Undefine
+parseClear    = simpl 'c' (const Clear)
+parseInput    = probably [ parseClear, parseUndefine, parseType, parseKind, parseInfo, parseStmt, parseDecl, parseExpr ]
+  where
+    probably = foldr1 (\l r -> Text.Parsec.try l <|> r)
+
+ppoutput :: Output -> [String]
+ppoutput (OK s)          = s
+ppoutput (Exception s e) = overLast (++ ("*** Exception: " ++ e)) s
+ppoutput (Errors errs)   = errs
+ppoutput (Partial s)     = overLast (++ "*** Timed out") s
+ppoutput Timeout         = ["*** Timed out"]
+
 data Repl = Repl
     { inputChan         :: Chan Input
     , outputChan        :: Chan ReplOutput
@@ -47,6 +98,14 @@ data Repl = Repl
     , patienceForResult :: Double
     , lineLength        :: Int
     }
+
+input :: Repl -> Input -> IO ()
+input = writeChan . inputChan
+
+-- | Naiively get the next set of results. This /does not/ take into account
+-- 'patienceForResults', 'patienceForErrors', or 'lineLength'.
+output :: Repl -> IO ReplOutput
+output = readChan . outputChan
 
 {-# INLINE (!?) #-}
 (!?) :: [a] -> Int -> Maybe a
@@ -67,22 +126,24 @@ overLast f = go
     go [x]    = [f x]
     go (x:xs) = x : go xs
 
-input :: Repl -> Input -> IO ()
-input = writeChan . inputChan
-
--- | Naiively get the next set of results. This /does not/ take into account
--- 'patienceForResults', 'patienceForErrors', or 'lineLength'.
-output :: Repl -> IO ReplOutput
-output = readChan . outputChan
+-- | Same as 'prompt_', except it parses the input, and pretty prints the results.
+prompt
+    :: Repl
+    -> String
+    -> IO [String]
+prompt repl x = ppoutput <$> prompt_ repl (case runParser parseInput () "" x of
+    Right a -> a
+    -- Should be impossible to reach. parseExpr gobbles up everything.
+    _       -> error "Cannot parse input!")
 
 -- | Enter commands and an expression to a 'Repl', and immediately consume results.
 -- However, truncate input to the given length, and stop the computation after the
 -- given amount of time in seconds.
-prompt 
+prompt_ 
     :: Repl
     -> Input
     -> IO Output
-prompt repl x = do
+prompt_ repl x = do
     input repl x
     results <- output repl
     threads <- newIORef []
@@ -215,12 +276,6 @@ defaultLineLength = 512
 defaultPatienceForResults :: Double
 defaultPatienceForResults = 5
 
--- | 'prompt_', if you don't care about limits.
-prompt_ :: Repl -> Input -> IO ReplOutput
-prompt_ r i = do
-    writeChan (inputChan r) i
-    readChan (outputChan r)
-
 -- | 'Repl' smart constructor.
 repl' 
     :: [String]        -- ^ Imports, using normal Haskell import syntax
@@ -256,7 +311,7 @@ repl' imports exts inp out wait len = do
                     Type s -> errors $ formatType <$> exprType s
                     Kind s -> errors $ formatType . snd <$> typeKind True s
                     Decl s -> errors $ do _names <- runDecls s; return $ Output ["OK."]
-                    Bind s -> errors $ do void (runStmt ("let {" ++ s ++ "}") SingleStep); return $ Output ["OK."]
+                    Stmt s -> errors $ do void (runStmt s SingleStep); return $ Output ["OK."]
                     Expr s -> errors $ do
                         compiled <- dynCompileExpr $ "show (" ++ s ++ ")"
                         return $ Output [fromDyn compiled ""]
