@@ -41,6 +41,8 @@ import GHC.Paths
 import DynFlags
 import GhcMonad
 import Outputable (showSDocForUser, Outputable, ppr, neverQualify)
+import HscTypes
+import OccName
 
 data Repl a = Repl
     { inputChan         :: Chan Input
@@ -283,12 +285,12 @@ defaultImports
     ,"import Data.Word"
     ,"import Data.List"
     ,"import Data.Maybe"
-    ,"import Data.Semigroup"
     ,"import Data.Bits"
     ,"import Data.Array"
     ,"import Data.Ix"
     ,"import Data.Functor"
     ,"import Data.Typeable"
+    ,"import Data.Monoid"
     ]
 
 defaultExtensions :: [ExtensionFlag]
@@ -312,6 +314,8 @@ defaultExtensions
     ,Opt_FlexibleInstances
     ,Opt_FlexibleContexts
     ,Opt_FunctionalDependencies
+    ,Opt_StandaloneDeriving
+    ,Opt_MultiParamTypeClasses
     ,Opt_GADTs]
 
 -- | defaultLineLength = 512
@@ -342,7 +346,7 @@ repl'
 repl' inp out imports exts build process wait len = do
     interp <- forkIO $
         runGhc (Just libdir) $ do
-            dflags <- session
+            dflags <- mkSession
             let sdoc :: Outputable a => a -> String
                 sdoc = showSDocForUser dflags neverQualify . ppr
 
@@ -355,13 +359,24 @@ repl' inp out imports exts build process wait len = do
 
             forever $ do
                 import_ imports
-                i' <- liftIO (readChan inp)
+                i'   <- liftIO (readChan inp)
                 liftIO . writeChan out =<< case i' of
                     Clear      -> do
                         setTargets []
                         void (load LoadAllTargets)
                         return (Output ["Cleared memory."])
-                    Undefine _ -> return (ReplError "Not implemeneted")
+
+                    Undefine s' -> fmap Output $ 
+                        forM (words s') $ \s -> do
+                            let eqs :: NamedThing a => a -> Bool
+                                eqs n = occNameString (getOccName n) == s
+                            session <- getSession
+                            setSession session
+                                { hsc_IC = (hsc_IC session)
+                                    { ic_tythings = filter (not . eqs) (ic_tythings (hsc_IC session)) }
+                                }
+                            return "OK"
+
                     Type s -> errors $ formatType <$> exprType s
                     Kind s -> errors $ formatType . snd <$> typeKind True s
                     Decl s -> errors $ do _names <- runDecls s; return (Output ["OK."]) --  ["OK."]
@@ -393,7 +408,7 @@ repl' inp out imports exts build process wait len = do
 
     import_ = mapM (fmap IIDecl . parseImportDecl) >=> setContext
     getExts = foldr (fmap . flip xopt_set) id
-    session = do
+    mkSession = do
         s <- getProgramDynFlags
         _ <- setSessionDynFlags 
             $ (\d -> d { safeHaskell = Sf_Safe })
