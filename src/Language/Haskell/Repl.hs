@@ -23,20 +23,17 @@ module Language.Haskell.Repl
     ) where
 
 import Control.Concurrent
-import Control.Applicative
-import Control.Exception
+import Control.Applicative ((<$>))
+import Control.Exception (catch, SomeException(..), ErrorCall(..), fromException)
 import Control.Monad
 import Control.Arrow
 import Data.Dynamic
 import Data.IORef
+import Data.Char (isAscii)
 import Data.Maybe
-import Data.List
-import Text.Parsec hiding (many,(<|>),newline)
+import Text.Parsec hiding (newline)
 import Text.Parsec.String
-import qualified Language.Haskell.Exts.Parser as H
-import qualified Language.Haskell.Exts.Syntax as H
-import qualified Language.Haskell.Exts.Extension as H
-
+import qualified Language.Haskell.Exts as H
 import GHC
 import GHC.Paths
 import DynFlags
@@ -81,53 +78,50 @@ data Output
     | Timeout   [String]
   deriving Show
 
-prefix :: Char -> Parser ()
-prefix c = do
-    _ <- string [':',c]
+prefix :: String -> Parser ()
+prefix (x:xs) = do
+    _ <- string [':',x]
+    forM_ xs (optional . char)
     spaces
+prefix [] = fail "empty prefix"
 
-input' :: Char -> (String -> Parser a) -> Parser a
-input' p f = do
-    prefix p
-    f =<< getInput
-
-simpl :: Char -> (String -> a) -> Parser a
-simpl c f = input' c (return . f)
-
-parseMode :: H.ParseMode
-parseMode = H.defaultParseMode 
-    { H.extensions = H.knownExtensions \\
-        [ H.TemplateHaskell
-        , H.CPP
-        , H.ForeignFunctionInterface
-        , H.UnliftedFFITypes
-        , H.XmlSyntax
-        , H.MagicHash
-        , H.HereDocuments
-        , H.QuasiQuotes
-        , H.NPlusKPatterns
-        , H.UnboxedTuples ] 
-    }
+simpl :: String -> (String -> a) -> Parser a
+simpl pfix f = do
+    prefix pfix
+    f <$> getInput
 
 parseType, parseKind, parseInfo, parseDecl, parseStmt, parseExpr, parseUndefine, parseClear, parseInput :: Parser Input
-parseType = simpl 't' Type
-parseKind = simpl 'k' Kind
-parseInfo = simpl 'i' Info
-parseDecl = do
-    decl <- getInput
-    case H.parseDeclWithMode parseMode decl of
-        H.ParseOk H.PatBind{}   -> fail "Use a let-binding."
-        H.ParseOk H.TypeSig{}   -> fail "That's an expression, dummy."
-        H.ParseOk _             -> return (Decl decl)
-        _                       -> fail "Not a declaration"
+parseType     = simpl "type"  Type
+parseKind     = simpl "kind"  Kind
+parseInfo     = simpl "info"  Info
+parseUndefine = simpl "undef" Undefine
+parseClear    = simpl "clear" (const Clear)
+parseDecl     = do
+    -- from InteractiveUI.hs
+    p <- single ["class ","type ","data ","newtype ","instance ","deriving ","foreign ","default(","default "]
+    r <- getInput
+    return (Decl (p ++ r))
+  where single = foldr1 (<|>) . map (try . string)
+
 parseStmt = do
+    -- Problem: a Stmt is automatically ran if it is :: IO a
+    -- So we have to make sure it is a let binding.
+    -- BUT haskell-src-exts can't handle Unicode in let bindings, so valid
+    -- let bindings like "let あ = 0" get obliterated. Therefore, short of
+    -- actually parsing the binding ourselves, we replaceanything not ASCII 
+    -- with an ASCII character ('x').
     stmt <- getInput
-    case H.parseStmtWithMode parseMode stmt of
-        H.ParseOk H.LetStmt{}   -> return (Stmt stmt)
-        _                       -> fail "Not a let binding."
-parseExpr     = Expr <$> getInput
-parseUndefine = simpl 'd' Undefine
-parseClear    = simpl 'c' (const Clear)
+    case H.parseStmt stmt of
+        H.ParseOk H.LetStmt{} 
+          -> return (Stmt stmt)
+        _ -> case H.parseStmt (mangle stmt) of
+            H.ParseOk H.LetStmt{} 
+              -> return (Stmt stmt)
+            _ -> fail "Not a let binding."
+  where
+    mangle = map $ \c -> if isAscii c then c else 'x'
+
+parseExpr = Expr <$> getInput
 
 -- | Used by 'prompt'
 parseInput   = foldr1 (\l r -> Text.Parsec.try l <|> r) 
@@ -141,13 +135,13 @@ parseInput   = foldr1 (\l r -> Text.Parsec.try l <|> r)
     , parseExpr ]
 
 -- | Used by 'prompt'.
-prettyOutput :: Output -> [String]
-prettyOutput (OK s)          = s
-prettyOutput (Partial s)     = s
-prettyOutput (Errors errs)   = errs
-prettyOutput (Exception s e) = overLast (++ ("*** Exception: " ++ e)) s
-prettyOutput (Timeout [])    = ["*** Timed out"]
-prettyOutput (Timeout s)     = overLast (++ "*** Timed out") s
+prettyOutput :: Repl a -> Output -> [String]
+prettyOutput _ (OK s)          = s
+prettyOutput _ (Partial s)     = s
+prettyOutput _ (Errors errs)   = errs
+prettyOutput r (Exception s e) = map (take (lineLength r)) (overLast (++ ("*** Exception: " ++ e)) s)
+prettyOutput _ (Timeout [])    = ["*** Timed out"]
+prettyOutput _ (Timeout s)     = overLast (++ "*** Timed out") s
 
 -- | Send input.
 send :: Repl a -> Input -> IO ()
@@ -193,7 +187,7 @@ prompt
     :: Repl [String]
     -> String
     -> IO [String]
-prompt repl x = prettyOutput <$> prompt_ repl (case runParser parseInput () "" x of
+prompt repl x = prettyOutput repl <$> prompt_ repl (case runParser parseInput () "" x of
     Right a -> a
     -- Should be impossible to reach. parseExpr gobbles up everything.
     _       -> error "Cannot parse input!")
@@ -266,7 +260,7 @@ newRepl = do
     out <- newChan
     repl' inp out 
         defaultImports 
-        defaultExtensions 
+        (map extFlag defaultExtensions ++ ["-XSafe","-dcore-lint","-XTypeFamilies"])
         defaultBuildExpr 
         defaultProcessOutput 
         defaultPatience
@@ -299,6 +293,7 @@ defaultImports
     ,"import Data.Word"
     ,"import Data.List"
     ,"import Data.Maybe"
+    ,"import Data.Bits.Lens"
     ,"import Data.Bits"
     ,"import Data.Array"
     ,"import Data.Ix"
@@ -331,10 +326,14 @@ defaultExtensions
     ,Opt_StandaloneDeriving
     ,Opt_MultiParamTypeClasses
     ,Opt_UnicodeSyntax
-    ,Opt_Rank2Types
     ,Opt_RankNTypes
     ,Opt_ExistentialQuantification
     ,Opt_GADTs]
+
+extFlag :: ExtensionFlag -> String
+extFlag a = case show a of
+    'O':'p':'t':'_':ext -> "-X"++ext
+    _                   -> ""
 
 -- | defaultLineLength = 512
 defaultLineLength :: Int
@@ -355,16 +354,20 @@ repl'
     :: Chan Input           -- ^ Input channel
     -> Chan (ReplOutput a)  -- ^ Output channel
     -> [String]             -- ^ Imports, using normal Haskell import syntax
-    -> [ExtensionFlag]      -- ^ List of compiler extensions to use
+    -> [String]             -- ^ List of compiler flags
     -> (String -> String)   -- ^ Used to build the expression actually sent to GHC
     -> (Dynamic -> IO a)    -- ^ Used to send output to the output 'Chan'.
     -> Double               -- ^ Maximum time to wait for a result, in seconds
     -> Int                  -- ^ Maximum line length in 'Char'
     -> IO (Repl a)
-repl' inp out imports exts build process wait len = do
+repl' inp out imports compilerFlags build process wait len = do
     interp <- forkIO $
         runGhc (Just libdir) $ do
-            dflags <- mkSession
+            initialDynFlags <- getProgramDynFlags
+            (dflags',_,_)   <- parseDynamicFlags initialDynFlags (map (mkGeneralLocated "flag") compilerFlags)
+            _pkgs           <- setSessionDynFlags dflags'
+            dflags          <- getSessionDynFlags
+
             let sdoc :: Outputable a => a -> String
                 sdoc = showSDocForUser dflags neverQualify . ppr
 
@@ -420,18 +423,18 @@ repl' inp out imports exts build process wait len = do
         }
   where
     errors x = x `gcatch` \ e@SomeException{} -> 
-        case fromException e :: Maybe ErrorCall of
-            Just _ -> return $ ReplError (show e)
-            _      -> return $ GhcError  (show e)
+        return $! case fromException e :: Maybe ErrorCall of
+            Just _ -> ReplError (show e)
+            _      -> GhcError  (show e)
 
     import_ = mapM (fmap IIDecl . parseImportDecl) >=> setContext
+    {-
     getExts = foldr (fmap . flip xopt_set) id
     mkSession = do
         s <- getProgramDynFlags
-        _ <- setSessionDynFlags 
-            $ (\d -> d { safeHaskell = Sf_Safe })
-            . flip dopt_set Opt_DoCoreLinting 
-            $ getExts exts s
-
-        getSessionDynFlags
+        let ds = getExts exts
+               . flip dopt_set Opt_DoCoreLinting 
+               . (\d -> d { safeHaskell = Sf_Safe })
+        setSessionDynFlags (ds s)
+    -}
 
