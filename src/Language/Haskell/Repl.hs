@@ -245,8 +245,9 @@ prompt_ repl x = do
                 forM_ l push
             putMVar final . OK =<< readIORef outputs
         
+        output <- takeMVar final
         mapM_ killThread =<< readIORef threads
-        takeMVar final
+        return output
   where
     trim = take (lineLength repl)
 
