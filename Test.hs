@@ -1,5 +1,4 @@
 import Language.Haskell.Repl
-import Control.Monad
 
 (-->) = (,)
 
@@ -26,6 +25,7 @@ main = do
         , "classes"                     --> "class Abc a b | a -> b"
         , "instances"                   --> "instance Abc X X'"
         , "let-bindings"                --> "let x = X; x' = X' x"
+        , "normal binding (should fail)"--> "asdf = 31" 
         ]
 
     test "Types"
@@ -35,11 +35,13 @@ main = do
 
     test "Kinds"
         [ ":k X"                        --> ":k X"
+        , ":k Abc"                      --> ":k Abc"
         ]
 
     test "Misc"
         [ "info"                        --> ":i Monoid"
-        , "undefining"                  --> ":d x'"
+        , "undefining x"                --> ":d x"
+        , "try to get x anyway"         --> ":t x"
         , "clear"                       --> ":c"
-        , "(try to get something)"      --> ":t X"
+        , "try to get X anyway"         --> ":t X"
         ]
