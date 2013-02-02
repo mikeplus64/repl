@@ -70,7 +70,7 @@ data ReplOutput a
     = ReplError String
     | GhcError  String
     | Output    [String]
-    | Result    a-- [String]
+    | Result    a
   deriving Show
 
 data Output
@@ -116,13 +116,14 @@ parseInfo = simpl 'i' Info
 parseDecl = do
     decl <- getInput
     case H.parseDeclWithMode parseMode decl of
-        H.ParseOk H.PatBind{} -> fail "Use a let-binding."
-        H.ParseOk _           -> return (Decl decl)
-        _                     -> fail "Not a declaration"
+        H.ParseOk H.PatBind{}   -> fail "Use a let-binding."
+        H.ParseOk H.TypeSig{}   -> fail "That's an expression, dummy."
+        H.ParseOk _             -> return (Decl decl)
+        _                       -> fail "Not a declaration"
 parseStmt = do
     stmt <- getInput
     case H.parseStmtWithMode parseMode stmt of
-        H.ParseOk (H.LetStmt _) -> return (Stmt stmt)
+        H.ParseOk H.LetStmt{}   -> return (Stmt stmt)
         _                       -> fail "Not a let binding."
 parseExpr     = Expr <$> getInput
 parseUndefine = simpl 'd' Undefine
@@ -240,7 +241,7 @@ prompt_ repl x = do
             forM_ results $ \l -> do
                 newline
                 forM_ l push
-            putMVar final . OK =<< readIORef outputs
+            putMVar final . OK =<< readOutput
         
         output <- takeMVar final
         mapM_ killThread =<< readIORef threads
@@ -329,6 +330,10 @@ defaultExtensions
     ,Opt_FunctionalDependencies
     ,Opt_StandaloneDeriving
     ,Opt_MultiParamTypeClasses
+    ,Opt_UnicodeSyntax
+    ,Opt_Rank2Types
+    ,Opt_RankNTypes
+    ,Opt_ExistentialQuantification
     ,Opt_GADTs]
 
 -- | defaultLineLength = 512
@@ -388,7 +393,7 @@ repl' inp out imports exts build process wait len = do
                                 { hsc_IC = (hsc_IC session)
                                     { ic_tythings = filter (not . eqs) (ic_tythings (hsc_IC session)) }
                                 }
-                            return "OK"
+                            return "OK."
 
                     Type s -> errors $ formatType <$> exprType s
                     Kind s -> errors $ formatType . snd <$> typeKind True s
