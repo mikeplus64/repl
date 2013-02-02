@@ -16,8 +16,8 @@ module Language.Haskell.Repl
     , Output(..) 
     , prompt
     , prompt_
-    , input
-    , output
+    , send
+    , result
     , prettyOutput
     , parseInput
     ) where
@@ -30,11 +30,12 @@ import Control.Arrow
 import Data.Dynamic
 import Data.IORef
 import Data.Maybe
-import qualified Data.DList as DL
+import Data.List
 import Text.Parsec hiding (many,(<|>),newline)
 import Text.Parsec.String
 import qualified Language.Haskell.Exts.Parser as H
 import qualified Language.Haskell.Exts.Syntax as H
+import qualified Language.Haskell.Exts.Extension as H
 
 import GHC
 import GHC.Paths
@@ -77,7 +78,7 @@ data Output
     | Exception [String] String
     | Errors    [String]
     | Partial   [String]
-    | Timeout
+    | Timeout   [String]
   deriving Show
 
 prefix :: Char -> Parser ()
@@ -98,17 +99,32 @@ valid f x = case f x of
     H.ParseOk _ -> True
     _           -> False
 
+parseMode :: H.ParseMode
+parseMode = H.defaultParseMode 
+    { H.extensions = H.knownExtensions \\
+        [ H.TemplateHaskell
+        , H.CPP
+        , H.ForeignFunctionInterface
+        , H.UnliftedFFITypes
+        , H.XmlSyntax
+        , H.MagicHash
+        , H.HereDocuments
+        , H.QuasiQuotes
+        , H.NPlusKPatterns
+        , H.UnboxedTuples ] 
+    }
+
 parseType, parseKind, parseInfo, parseDecl, parseStmt, parseExpr, parseUndefine, parseClear, parseInput :: Parser Input
 parseType = simpl 't' Type
 parseKind = simpl 'k' Kind
 parseInfo = simpl 'i' Info
 parseDecl = do
     decl <- getInput
-    guard (valid H.parseDecl decl)
+    guard (valid (H.parseDeclWithMode parseMode) decl)
     return (Decl decl)
 parseStmt = do
     stmt <- getInput
-    case H.parseStmt stmt of
+    case H.parseStmtWithMode parseMode stmt of
         H.ParseOk (H.LetStmt _) -> return (Stmt stmt)
         _                       -> fail "Not a let binding."
 parseExpr     = Expr <$> getInput
@@ -129,24 +145,25 @@ parseInput   = foldr1 (\l r -> Text.Parsec.try l <|> r)
 -- | Used by 'prompt'.
 prettyOutput :: Output -> [String]
 prettyOutput (OK s)          = s
-prettyOutput (Exception s e) = overLast (++ ("*** Exception: " ++ e)) s
+prettyOutput (Partial s)     = s
 prettyOutput (Errors errs)   = errs
-prettyOutput (Partial s)     = overLast (++ "*** Timed out") s
-prettyOutput Timeout         = ["*** Timed out"]
+prettyOutput (Exception s e) = overLast (++ ("*** Exception: " ++ e)) s
+prettyOutput (Timeout [])    = ["*** Timed out"]
+prettyOutput (Timeout s)     = overLast (++ "*** Timed out") s
 
 -- | Send input.
-input :: Repl a -> Input -> IO ()
-input = writeChan . inputChan
+send :: Repl a -> Input -> IO ()
+send = writeChan . inputChan
 
 -- | Naiively get the next set of results. This /does not/ take into account
 -- 'patiences', 'patienceForErrors', or 'lineLength'. However, due
 -- to laziness, this may not matter.
-output :: Repl a -> IO (ReplOutput a)
-output = readChan . outputChan
+result :: Repl a -> IO (ReplOutput a)
+result = readChan . outputChan
 
-{-# INLINE (!?) #-}
-(!?) :: [a] -> Int -> Maybe a
-ys !? i 
+{-# INLINE index #-}
+index :: Int -> [a] -> Maybe a
+i `index` ys
     | i >= 0    = go 0 ys
     | otherwise = Nothing
   where
@@ -155,6 +172,12 @@ ys !? i
         | j == i    = Just x
         | otherwise = go (j+1) xs
 
+{-# INLINE overHead #-}
+overHead :: (a -> a) -> [a] -> [a]
+overHead f xs' = case xs' of
+    x:xs -> f x : xs
+    _    -> []
+ 
 {-# INLINE overLast #-}
 overLast :: (a -> a) -> [a] -> [a]
 overLast f = go
@@ -162,6 +185,10 @@ overLast f = go
     go []     = []
     go [x]    = [f x]
     go (x:xs) = x : go xs
+
+{-# INLINE lengthAt #-}
+lengthAt :: Int -> [[a]] -> Int
+lengthAt i = maybe 0 length . index i
 
 -- | Same as 'prompt_', except it parses the input, and pretty prints the results.
 prompt
@@ -181,58 +208,44 @@ prompt_
     -> Input
     -> IO Output
 prompt_ repl x = do
-    input repl x
-    results <- output repl
-    threads <- newIORef []
-    final   <- newEmptyMVar
+    send repl x
+    results' <- result repl
 
-    -- outputs is used iff an exception is raised by the compiled input.
-    outputs <- newIORef [] :: IO (IORef [DL.DList Char])
-
-    let readOutputs = map DL.toList <$> readIORef outputs
-        newline     = modifyIORef outputs (++ [DL.empty])
-        push char'  = modifyIORef outputs (overLast (`DL.snoc` char'))
-
-        fork f = do
-            t <- forkIO $ f `catch` \e@SomeException{} -> do
-                outs <- readOutputs
-                putMVar final (Exception outs (show e))
-            modifyIORef threads (t:)
-
-        -- Get the "progress" of a list.
-        prog ys = do
-            acc <- newIORef 0
-            fork $ forM_ ys $ \_ -> modifyIORef acc (\i -> if i > lineLength repl then i else i+1)
-            return acc
-
-    unlessRedundant results $ \ res -> do
+    unlessRedundant results' $ \ results -> do
+        -- outputs is used iff an exception is raised by the compiled input.
+        -- This was a DList, but I didn't find any real advantage of it over
+        -- [String] -- snoc was cheap but toList very expensive.
+        outputs :: IORef [String]   <- newIORef []
+        threads :: IORef [ThreadId] <- newIORef []
+        final   :: MVar Output      <- newEmptyMVar
+        let push    c   = do
+                output <- readIORef outputs
+                if lengthAt (length output - 1) output > lineLength repl
+                  then putMVar final (Partial output)
+                  else writeIORef outputs (overHead (c:) output)
+            newline     = modifyIORef outputs ([]:)
+            readOutput  = reverse . map reverse <$> readIORef outputs
+            fork f      = do
+                thread <- forkIO $ f `catch` \e@SomeException{} -> do
+                    output <- readOutput
+                    putMVar final (Exception output (show e))
+                modifyIORef threads (thread:)
 
         -- Time out
+        -- This can return only Timeout <what was consumed so far>
         fork $ do
-            threadDelay (floor (patience repl*1000000))
-            u <- readOutputs
-            case res !? length u of
-                Nothing -> putMVar final (if null u then Timeout else Partial u)
-                Just h  -> do
-                    p <- prog h
-                    i <- readIORef p
-                    putMVar final $ case take i h of
-                        [] -> case u of
-                            [] -> Timeout
-                            _  -> Partial u
-                        xs -> Partial (u ++ [xs])
+            threadDelay (floor (patience repl * 1000000))
+            output <- readOutput
+            putMVar final (Timeout output)
 
-        -- Return everything
+        -- Read characters off of results, and "push" them to outputs.
         fork $ do
-            let r = map trim res
-            forM_ r $ \l -> do
+            forM_ results $ \l -> do
                 newline
                 forM_ l push
-            putMVar final (OK r)
+            putMVar final . OK =<< readIORef outputs
 
-        fin <- takeMVar final
-        mapM_ killThread =<< readIORef threads
-        return fin
+        takeMVar final
   where
     trim = take (lineLength repl)
 
