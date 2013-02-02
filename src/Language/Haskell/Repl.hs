@@ -94,11 +94,6 @@ input' p f = do
 simpl :: Char -> (String -> a) -> Parser a
 simpl c f = input' c (return . f)
 
-valid :: (String -> H.ParseResult a) -> String -> Bool
-valid f x = case f x of
-    H.ParseOk _ -> True
-    _           -> False
-
 parseMode :: H.ParseMode
 parseMode = H.defaultParseMode 
     { H.extensions = H.knownExtensions \\
@@ -120,8 +115,10 @@ parseKind = simpl 'k' Kind
 parseInfo = simpl 'i' Info
 parseDecl = do
     decl <- getInput
-    guard (valid (H.parseDeclWithMode parseMode) decl)
-    return (Decl decl)
+    case H.parseDeclWithMode parseMode decl of
+        H.ParseOk H.PatBind{} -> fail "Use a let-binding."
+        H.ParseOk _           -> return (Decl decl)
+        _                     -> fail "Not a declaration"
 parseStmt = do
     stmt <- getInput
     case H.parseStmtWithMode parseMode stmt of
@@ -221,10 +218,10 @@ prompt_ repl x = do
         let push    c   = do
                 output <- readIORef outputs
                 if lengthAt (length output - 1) output > lineLength repl
-                  then putMVar final (Partial output)
+                  then putMVar final (Partial (unreverse output))
                   else writeIORef outputs (overHead (c:) output)
             newline     = modifyIORef outputs ([]:)
-            readOutput  = reverse . map reverse <$> readIORef outputs
+            readOutput  = unreverse <$> readIORef outputs
             fork f      = do
                 thread <- forkIO $ f `catch` \e@SomeException{} -> do
                     output <- readOutput
@@ -249,7 +246,8 @@ prompt_ repl x = do
         mapM_ killThread =<< readIORef threads
         return output
   where
-    trim = take (lineLength repl)
+    unreverse = reverse . map reverse
+    trim      = take (lineLength repl)
 
     -- | Don't bother with things other than an actual result from an expression -- they will be loaded "instantly"
     unlessRedundant (ReplError s) _ = return . Errors . map trim . lines $ s
