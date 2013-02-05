@@ -4,10 +4,12 @@ module Language.Haskell.Repl
     -- * Construction
     , newRepl
     , repl'
-    , defaultExtensions
+    , defaultFlags
     , defaultImports
     , defaultLineLength
     , defaultPatience
+    , defaultBuildExpr
+    , defaultProcessOutput
     -- * Stopping
     , stopRepl
     -- * Interaction
@@ -24,7 +26,7 @@ module Language.Haskell.Repl
 
 import Control.Concurrent
 import Control.Applicative ((<$>))
-import Control.Exception (catch, SomeException(..), ErrorCall(..), fromException)
+import Control.Exception (catch, SomeException(..), ErrorCall(..), fromException, Exception(..), evaluate)
 import Control.Monad
 import Control.Arrow
 import Data.Dynamic
@@ -36,11 +38,11 @@ import Text.Parsec.String
 import qualified Language.Haskell.Exts as H
 import GHC
 import GHC.Paths
-import DynFlags
 import GhcMonad
 import Outputable (showSDocForUser, Outputable, ppr, neverQualify)
 import HscTypes
 import OccName
+import System.IO.Unsafe
 
 data Repl a = Repl
     { inputChan         :: Chan Input
@@ -134,12 +136,20 @@ parseInput   = foldr1 (\l r -> Text.Parsec.try l <|> r)
     , parseDecl
     , parseExpr ]
 
+unsafeCatch :: Exception e => a -> (e -> a) -> a
+unsafeCatch a f = unsafePerformIO (catch (evaluate a) (return . f))
+
+cripple :: a -> a -> a
+cripple x y = unsafeCatch x (\SomeException{} -> y)
+
 -- | Used by 'prompt'.
 prettyOutput :: Repl a -> Output -> [String]
 prettyOutput _ (OK s)          = s
 prettyOutput _ (Partial s)     = s
 prettyOutput _ (Errors errs)   = errs
-prettyOutput r (Exception s e) = map (take (lineLength r)) (overLast (++ ("*** Exception: " ++ e)) s)
+prettyOutput r (Exception s e) = map 
+    (take (lineLength r)) 
+    (overLast (++ ("*** Exception: " ++ cripple e "*** Exception: that's enough exceptions for you.")) s)
 prettyOutput _ (Timeout [])    = ["*** Timed out"]
 prettyOutput _ (Timeout s)     = overLast (++ "*** Timed out") s
 
@@ -260,7 +270,7 @@ newRepl = do
     out <- newChan
     repl' inp out 
         defaultImports 
-        (map extFlag defaultExtensions ++ ["-XSafe","-dcore-lint","-XTypeFamilies"])
+        defaultFlags
         defaultBuildExpr 
         defaultProcessOutput 
         defaultPatience
@@ -292,48 +302,52 @@ defaultImports
     ,"import Data.Int"
     ,"import Data.Word"
     ,"import Data.List"
+    ,"import Data.List.Split"
     ,"import Data.Maybe"
-    ,"import Data.Bits.Lens"
     ,"import Data.Bits"
     ,"import Data.Array"
     ,"import Data.Ix"
     ,"import Data.Functor"
     ,"import Data.Typeable"
     ,"import Data.Monoid"
+    ,"import Data.Ratio"
+    ,"import Data.Complex"
+    ,"import Data.Char"
+    ,"import Data.Bits.Lens"
+    ,"import Data.List.Lens"
+    ,"import Data.List.Split.Lens"
     ]
 
-defaultExtensions :: [ExtensionFlag]
-defaultExtensions 
-  = [Opt_DataKinds
-    ,Opt_PolyKinds
-    ,Opt_KindSignatures
-    ,Opt_TypeFamilies
-    ,Opt_TypeOperators
-    ,Opt_DeriveFunctor
-    ,Opt_DeriveTraversable
-    ,Opt_DeriveFoldable
-    ,Opt_DeriveDataTypeable
-    ,Opt_DeriveGeneric
-    ,Opt_OverloadedStrings
-    ,Opt_ImplicitParams
-    ,Opt_BangPatterns
-    ,Opt_PatternGuards
-    ,Opt_MultiWayIf
-    ,Opt_LambdaCase
-    ,Opt_FlexibleInstances
-    ,Opt_FlexibleContexts
-    ,Opt_FunctionalDependencies
-    ,Opt_StandaloneDeriving
-    ,Opt_MultiParamTypeClasses
-    ,Opt_UnicodeSyntax
-    ,Opt_RankNTypes
-    ,Opt_ExistentialQuantification
-    ,Opt_GADTs]
-
-extFlag :: ExtensionFlag -> String
-extFlag a = case show a of
-    'O':'p':'t':'_':ext -> "-X"++ext
-    _                   -> ""
+defaultFlags :: [String]
+defaultFlags = map ("-X"++) 
+    ["DataKinds"
+    ,"PolyKinds"
+    ,"KindSignatures"
+    ,"TypeOperators"
+    ,"DeriveFunctor"
+    ,"DeriveTraversable"
+    ,"DeriveFoldable"
+    ,"DeriveDataTypeable"
+    ,"DeriveGeneric"
+    ,"OverloadedStrings"
+    ,"ImplicitParams"
+    ,"BangPatterns"
+    ,"PatternGuards"
+    ,"MultiWayIf"
+    ,"LambdaCase"
+    ,"FlexibleInstances"
+    ,"FlexibleContexts"
+    ,"FunctionalDependencies"
+    ,"StandaloneDeriving"
+    ,"MultiParamTypeClasses"
+    ,"UnicodeSyntax"
+    ,"RankNTypes"
+    ,"ExistentialQuantification"
+    ,"GADTs"
+    ,"TypeFamilies"
+    ,"Safe"
+    ] ++
+    [ "-dcore-lint" ]
 
 -- | defaultLineLength = 512
 defaultLineLength :: Int
