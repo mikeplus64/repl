@@ -23,6 +23,7 @@ main = do
         , "time out and show output"    --> "[0,1,2,3,let x = x in x]"
         , "complete quickly and error"  --> "[0,1,2,3,error \"yikes\"]"
         , "unicode string"              --> "let (⧺) = (++) in \"aaaa\" ⧺  \"私はバンゴホルーです。\" :: String"
+        , "2x fix error"                --> "(fix error, fix error)"
         ]
 
     test "Declarations"
