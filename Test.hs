@@ -1,5 +1,6 @@
 import Language.Haskell.Repl
 
+(-->) :: a -> b -> (a,b)
 (-->) = (,)
 
 main :: IO ()
@@ -8,7 +9,12 @@ main = do
     putStrLn "Started repl..."
     let test label ts = do
             putStrLn $ "--- " ++ label ++ " ---"
-            mapM_ (\(l,x') -> do x <- prompt repl x'; putStr $ l ++ ": "; mapM_ putStrLn x) ts
+            mapM_ 
+                (\(l,x') -> do 
+                    x <- prompt repl x'
+                    putStr $ l ++ ": "
+                    mapM_ putStrLn x) 
+                ts
 
     test "Expressions"
         [ "quickly return"              --> "let x = 32 in x"
@@ -16,6 +22,7 @@ main = do
         , "time out"                    --> "forever (return ()) :: Maybe ()"
         , "time out and show output"    --> "[0,1,2,3,let x = x in x]"
         , "complete quickly and error"  --> "[0,1,2,3,error \"yikes\"]"
+        , "unicode string"              --> "let (⧺) = (++) in \"aaaa\" ⧺  \"私はバンゴホルーです。\" :: String"
         ]
 
     test "Declarations"
@@ -26,10 +33,12 @@ main = do
         , "instances"                   --> "instance Abc X X'"
         , "let-bindings"                --> "let x = X; x' = X' x"
         , "normal binding (should fail)"--> "asdf = 31" 
+        , "unicode let binding"         --> "let あ = 'a'"
         ]
 
     test "Types"
         [ "x :: X"                      --> ":t x"
+        , ":t あ"                       --> ":t あ"
         , "fmapfmapfmap"                --> ":t fmap fmap fmap"
         ]
 
