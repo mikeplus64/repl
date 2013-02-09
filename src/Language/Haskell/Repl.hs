@@ -274,13 +274,16 @@ newRepl :: IO (Repl [String])
 newRepl = do
     inp <- newChan
     out <- newChan
-    repl' inp out $ Config
-        defaultImports 
-        defaultFlags
-        defaultBuildExpr 
-        defaultProcessOutput 
-        defaultPatience
-        defaultLineLength
+    repl' inp out defaultConfig
+
+defaultConfig :: Config [String]
+defaultConfig = Config
+    defaultImports 
+    defaultFlags
+    defaultBuildExpr 
+    defaultProcessOutput 
+    defaultPatience
+    defaultLineLength
 
 defaultImports :: [String]
 defaultImports
