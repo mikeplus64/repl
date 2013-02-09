@@ -48,8 +48,14 @@ data Repl a = Repl
     { inputChan         :: Chan Input
     , outputChan        :: Chan (ReplOutput a)
     , interpreter       :: ThreadId
-    , processOutput     :: Dynamic -> IO a
+    , config            :: Config a
+    }
+
+data Config a = Config
+    { imports           :: [String]
+    , compilerFlags     :: [String]
     , buildExpr         :: String  -> String
+    , process           :: Dynamic -> IO a
     , patience          :: Double
     , lineLength        :: Int
     }
@@ -148,7 +154,7 @@ prettyOutput _ (OK s)          = s
 prettyOutput _ (Partial s)     = s
 prettyOutput _ (Errors errs)   = errs
 prettyOutput r (Exception s e) = map 
-    (take (lineLength r)) 
+    (take (lineLength (config r))) 
     (overLast (++ ("*** Exception: " ++ cripple e "*** Exception: that's enough exceptions for you.")) s)
 prettyOutput _ (Timeout [])    = ["*** Timed out"]
 prettyOutput _ (Timeout s)     = overLast (++ "*** Timed out") s
@@ -222,7 +228,7 @@ prompt_ repl x = do
         final   :: MVar Output      <- newEmptyMVar
         let push    c   = do
                 output <- readIORef outputs
-                if lengthAt (length output - 1) output > lineLength repl
+                if lengthAt (length output - 1) output > lineLength (config repl)
                   then putMVar final (Partial (unreverse output))
                   else writeIORef outputs (overHead (c:) output)
             newline     = modifyIORef outputs ([]:)
@@ -236,7 +242,7 @@ prompt_ repl x = do
         -- Time out
         -- This can return only Timeout <what was consumed so far>
         fork $ do
-            threadDelay (floor (patience repl * 1000000))
+            threadDelay (floor (patience (config repl) * 1000000))
             output <- readOutput
             putMVar final (Timeout output)
 
@@ -252,7 +258,7 @@ prompt_ repl x = do
         return output
   where
     unreverse = reverse . map reverse
-    trim      = take (lineLength repl)
+    trim      = take (lineLength (config repl))
 
     -- | Don't bother with things other than an actual result from an expression -- they will be loaded "instantly"
     unlessRedundant (ReplError s) _ = return . Errors . map trim . lines $ s
@@ -268,7 +274,7 @@ newRepl :: IO (Repl [String])
 newRepl = do
     inp <- newChan
     out <- newChan
-    repl' inp out 
+    repl' inp out $ Config
         defaultImports 
         defaultFlags
         defaultBuildExpr 
@@ -367,18 +373,13 @@ defaultProcessOutput d = return (lines (fromDyn d ""))
 repl' 
     :: Chan Input           -- ^ Input channel
     -> Chan (ReplOutput a)  -- ^ Output channel
-    -> [String]             -- ^ Imports, using normal Haskell import syntax
-    -> [String]             -- ^ List of compiler flags
-    -> (String -> String)   -- ^ Used to build the expression actually sent to GHC
-    -> (Dynamic -> IO a)    -- ^ Used to send output to the output 'Chan'.
-    -> Double               -- ^ Maximum time to wait for a result, in seconds
-    -> Int                  -- ^ Maximum line length in 'Char'
+    -> Config a
     -> IO (Repl a)
-repl' inp out imports compilerFlags build process wait len = do
+repl' inp out cfg = do
     interp <- forkIO $
         runGhc (Just libdir) $ do
             initialDynFlags <- getProgramDynFlags
-            (dflags',_,_)   <- parseDynamicFlags initialDynFlags (map (mkGeneralLocated "flag") compilerFlags)
+            (dflags',_,_)   <- parseDynamicFlags initialDynFlags (map (mkGeneralLocated "flag") (compilerFlags cfg))
             _pkgs           <- setSessionDynFlags dflags'
             dflags          <- getSessionDynFlags
 
@@ -393,7 +394,7 @@ repl' inp out imports compilerFlags build process wait len = do
                   >>> Output
 
             forever $ do
-                import_ imports
+                import_ (imports cfg)
                 i'   <- liftIO (readChan inp)
                 liftIO . writeChan out =<< case i' of
                     Clear      -> do
@@ -417,8 +418,8 @@ repl' inp out imports compilerFlags build process wait len = do
                     Decl s -> errors $ do _names <- runDecls s; return (Output ["OK."]) --  ["OK."]
                     Stmt s -> errors $ do void (runStmt s SingleStep); return (Output ["OK."])
                     Expr s -> errors $ do
-                        compiled <- dynCompileExpr (build s)
-                        built    <- liftIO (process compiled)
+                        compiled <- dynCompileExpr (buildExpr cfg s)
+                        built    <- liftIO (process cfg compiled)
                         return (Result built)
                     Info s -> errors $ do
                         names <- parseName s
@@ -430,10 +431,7 @@ repl' inp out imports compilerFlags build process wait len = do
         { inputChan      = inp
         , outputChan     = out
         , interpreter    = interp
-        , processOutput  = process
-        , buildExpr      = build
-        , patience       = wait
-        , lineLength     = len
+        , config         = cfg
         }
   where
     errors x = x `gcatch` \ e@SomeException{} -> 
@@ -442,13 +440,4 @@ repl' inp out imports compilerFlags build process wait len = do
             _      -> GhcError  (show e)
 
     import_ = mapM (fmap IIDecl . parseImportDecl) >=> setContext
-    {-
-    getExts = foldr (fmap . flip xopt_set) id
-    mkSession = do
-        s <- getProgramDynFlags
-        let ds = getExts exts
-               . flip dopt_set Opt_DoCoreLinting 
-               . (\d -> d { safeHaskell = Sf_Safe })
-        setSessionDynFlags (ds s)
-    -}
 
